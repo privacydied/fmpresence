@@ -14,6 +14,8 @@ nothing is playing on Plex.
 It runs as a `systemd --user` service. It talks to the Discord desktop client
 through the local IPC socket. It does not need a Discord bot or a token.
 
+![fmpresence on a Discord profile](assets/screenshot.png)
+
 ## What it shows
 
 - Track title and artist
