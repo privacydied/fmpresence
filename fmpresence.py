@@ -49,7 +49,8 @@ def now_playing() -> dict | None:
     art = next((i["#text"] for i in reversed(t.get("image", [])) if i.get("#text")), "")
     return {
         "title": t["name"],
-        "artist": t["artist"]["#text"],
+        # Plex scrobbles multiple artists joined with ";"
+        "artist": ", ".join(a.strip() for a in t["artist"]["#text"].split(";") if a.strip()),
         "album": t.get("album", {}).get("#text", ""),
         "art": "" if PLACEHOLDER_ART in art else art,
         "url": t.get("url", ""),
