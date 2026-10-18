@@ -1,0 +1,13 @@
+[Unit]
+Description=Last.fm now playing -> Discord Rich Presence
+After=graphical-session.target network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/fmpresence/env
+ExecStart=/path/to/fmpresence/.venv/bin/python -u /path/to/fmpresence/fmpresence.py
+Restart=always
+RestartSec=10
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=default.target
