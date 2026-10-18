@@ -1,7 +1,30 @@
 [project]
 name = "fmpresence"
-version = "0.1.0"
-requires-python = ">=3.14"
+version = "0.2.0"
+description = "Plex / Last.fm now playing as a Discord Rich Presence"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
 dependencies = [
     "pypresence>=4.6.2",
+    "websockets>=13",
 ]
+
+[project.scripts]
+fmpresence = "fmpresence:main"
+
+[project.urls]
+Homepage = "https://github.com/privacydied/fmpresence"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["fmpresence"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,49 @@
+{
+ "recenttracks": {
+  "track": [
+   {
+    "artist": {
+     "mbid": "",
+     "#text": "Lucki"
+    },
+    "streamable": "0",
+    "image": [
+     {
+      "size": "small",
+      "#text": "https://lastfm-img.freetls.fastly.net/i/u/34s/b20ebeed77dfc238e81bad47446aa74e.jpg"
+     },
+     {
+      "size": "medium",
+      "#text": "https://lastfm-img.freetls.fastly.net/i/u/64s/b20ebeed77dfc238e81bad47446aa74e.jpg"
+     },
+     {
+      "size": "large",
+      "#text": "https://lastfm-img.freetls.fastly.net/i/u/174s/b20ebeed77dfc238e81bad47446aa74e.jpg"
+     },
+     {
+      "size": "extralarge",
+      "#text": "https://lastfm-img.freetls.fastly.net/i/u/300x300/b20ebeed77dfc238e81bad47446aa74e.jpg"
+     }
+    ],
+    "mbid": "",
+    "album": {
+     "mbid": "7015c004-4468-4056-bc6e-62844e2329d4",
+     "#text": "DR*GS R BAD"
+    },
+    "name": "Picky Demons :)",
+    "url": "https://www.last.fm/music/Lucki/_/Picky+Demons+:)",
+    "date": {
+     "uts": "1792367654",
+     "#text": "18 Oct 2026, 23:54"
+    }
+   }
+  ],
+  "@attr": {
+   "user": "TazFrags",
+   "totalPages": "52055",
+   "page": "1",
+   "perPage": "1",
+   "total": "52055"
+  }
+ }
+}

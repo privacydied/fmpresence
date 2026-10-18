@@ -1,0 +1,32 @@
+{
+ "MediaContainer": {
+  "size": 1,
+  "Metadata": [
+   {
+    "duration": 124087,
+    "grandparentThumb": "/library/metadata/16841/thumb/1791772142",
+    "grandparentTitle": "LUCKI",
+    "index": 3,
+    "librarySectionTitle": "Music",
+    "originalTitle": "LUCKI;Rylo Rodriguez;Veeze",
+    "parentIndex": 1,
+    "parentThumb": "/library/metadata/52720/thumb/1778855480",
+    "parentTitle": "Dr*gs R Bad",
+    "ratingKey": "52729",
+    "sessionKey": "11",
+    "thumb": "/library/metadata/52720/thumb/1778855480",
+    "title": "No Stars in Maybachs",
+    "type": "track",
+    "viewOffset": 39000,
+    "User": {
+     "id": "1",
+     "title": "privacydied"
+    },
+    "Player": {
+     "state": "playing",
+     "product": "Plex Web"
+    }
+   }
+  ]
+ }
+}
