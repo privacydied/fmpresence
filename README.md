@@ -20,7 +20,7 @@ through the local IPC socket. It does not need a Discord bot or a token.
 - Album art from Last.fm, with the album name on hover
 - A progress bar (Plex always knows the track length; Last.fm only sometimes)
 - A **View on Last.fm** button
-- A small grey Spotify icon in the corner of the album art. Hover over it to
+- Optional (`SPOTIFY_ICON=1`): a small grey Spotify icon on the album art. Hover over it to
   see **Find on Spotify**. Click it to open a Spotify search for the track.
 
 When nothing is playing, the presence is cleared. When Plex is paused, the
@@ -113,7 +113,7 @@ POLL_SECONDS=5
 | `SHOW_PAUSED`       | no       | `0`     | `1` keeps the presence while Plex is paused |
 | `POLL_SECONDS`      | no       | `15`    | Time between polls in seconds (minimum 5) |
 | `APP_NAME`          | no       |         | Replaces the "Listening to" name         |
-| `SPOTIFY_ICON`      | no       | `1`     | `0` removes the Spotify corner icon      |
+| `SPOTIFY_ICON`      | no       | `0`     | `1` adds the Spotify icon (Discord puts it on the album art, bottom right) |
 | `SPOTIFY_ICON_URL`  | no       | grey logo in `assets/` | Public image URL for the corner icon |
 | `LOG_LEVEL`         | no       | `INFO`  | Python log level                         |
 

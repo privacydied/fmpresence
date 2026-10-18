@@ -30,7 +30,7 @@ SHOW_PAUSED = os.environ.get("SHOW_PAUSED", "0").lower() in ("1", "true", "yes")
 POLL = max(5, int(os.environ.get("POLL_SECONDS", "15")))
 APP_NAME = os.environ.get("APP_NAME", "")  # optional: overrides the "Listening to <name>" text
 # small corner icon: hover shows a tooltip, click opens a Spotify search for the track
-SPOTIFY_ICON = os.environ.get("SPOTIFY_ICON", "1").lower() in ("1", "true", "yes")
+SPOTIFY_ICON = os.environ.get("SPOTIFY_ICON", "0").lower() in ("1", "true", "yes")
 SPOTIFY_ICON_URL = os.environ.get(
     "SPOTIFY_ICON_URL", "https://raw.githubusercontent.com/privacydied/fmpresence/main/assets/spotify-grey.png"
 )
