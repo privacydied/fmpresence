@@ -1,5 +1,5 @@
 [Unit]
-Description=Last.fm now playing -> Discord Rich Presence
+Description=Plex/Last.fm now playing -> Discord Rich Presence
 After=graphical-session.target network-online.target
 
 [Service]
