@@ -29,6 +29,11 @@ PLEX_USER = os.environ.get("PLEX_USER", "")  # default: the token's own account
 SHOW_PAUSED = os.environ.get("SHOW_PAUSED", "0").lower() in ("1", "true", "yes")
 POLL = max(5, int(os.environ.get("POLL_SECONDS", "15")))
 APP_NAME = os.environ.get("APP_NAME", "")  # optional: overrides the "Listening to <name>" text
+# small corner icon: hover shows a tooltip, click opens a Spotify search for the track
+SPOTIFY_ICON = os.environ.get("SPOTIFY_ICON", "1").lower() in ("1", "true", "yes")
+SPOTIFY_ICON_URL = os.environ.get(
+    "SPOTIFY_ICON_URL", "https://raw.githubusercontent.com/privacydied/fmpresence/main/assets/spotify-grey.png"
+)
 
 log = logging.getLogger("fmpresence")
 
@@ -57,6 +62,10 @@ def lastfm(method: str, **params: str) -> dict:
 def best_image(images: list) -> str:
     art = next((i["#text"] for i in reversed(images or []) if i.get("#text")), "")
     return "" if PLACEHOLDER_ART in art else art
+
+
+def spotify_search_url(artist: str, title: str) -> str:
+    return "https://open.spotify.com/search/" + urllib.parse.quote(f"{artist} {title}")
 
 
 def lastfm_url(artist: str, title: str) -> str:
@@ -302,6 +311,10 @@ def main() -> int:
                     large_text=clip(track["album"]) if track["album"] else None,
                     buttons=[{"label": "View on Last.fm", "url": track["url"]}] if track["url"] else None,
                 )
+                if SPOTIFY_ICON:
+                    kw["small_image"] = SPOTIFY_ICON_URL
+                    kw["small_text"] = "Find on Spotify"
+                    kw["small_url"] = spotify_search_url(track["artist"], track["title"])
                 if not track["paused"]:
                     kw["start"] = int(started)
                     if track["duration"]:
