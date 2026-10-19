@@ -241,4 +241,5 @@ The tests run offline. They use real API responses that are saved in
 | It never shows a track (Last.fm source) | Your player does not send "now playing" to Last.fm. Check your Last.fm profile while a track plays. Plex users: use the Plex source. |
 | No **Listen** button | The track is not in the Apple Music catalogue, or the match was not exact enough. |
 | `no album art found for …` | No source has a cover. Set up the [art proxy](#art-proxy-optional) to use your Plex covers. |
+| Art proxy URL gives Cloudflare error 526 | The reverse proxy serves the wrong TLS certificate for the art hostname. Assign your Cloudflare Origin certificate to it (Synology: **Control Panel → Security → Certificate → Settings**). |
 | Updates take up to `POLL_SECONDS` | The websocket is not connected. Look for `plex websocket connected` in the log. |

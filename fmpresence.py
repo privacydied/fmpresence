@@ -634,7 +634,7 @@ def serve_art(cfg: Config) -> int:
             log.debug("%s %s", self.address_string(), fmt % args)
 
         def do_GET(self):
-            m = re.match(r"^/a/([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\.jpg$", self.path)
+            m = re.match(r"^/a/([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\.jpg$", self.path.split("?", 1)[0])
             thumb = art_verify(cfg.art_secret, m.group(1)) if m else None
             if not thumb:
                 self.send_error(404)
