@@ -36,6 +36,7 @@ LASTFM_API = "https://ws.audioscrobbler.com/2.0/"
 ITUNES_API = "https://itunes.apple.com/search"
 # Last.fm's grey-star placeholder when a track has no art
 LASTFM_PLACEHOLDER = "2a96cbd8b46e442fc41c2b86b821562f"
+CLEAR_GRACE = 8  # seconds of "nothing playing" before the presence is cleared
 THUMB_RE = re.compile(r"^/library/metadata/\d+/(thumb|art)/\d+$")
 
 _XDG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
@@ -556,6 +557,7 @@ def run(cfg: Config) -> int:
     sent = None  # last payload Discord accepted (None = cleared)
     sent_at = 0.0
     lastfm_next = 0.0
+    idle_since = None
     backoff = cfg.poll
     while True:
         now = time.time()
@@ -597,13 +599,18 @@ def run(cfg: Config) -> int:
                         what = "paused" if track["paused"] else "now playing"
                         log.info("%s [%s]: %s - %s", what, track["source"], track["artist"], track["title"])
                     sent, sent_at = payload, now
+            idle_since = None
         elif sent is not None:
-            if rpc.call("clear"):
+            # Plex drops the session for a moment between tracks: wait before clearing
+            idle_since = idle_since or now
+            if now - idle_since >= CLEAR_GRACE and rpc.call("clear"):
                 log.info("nothing playing, cleared")
-                sent = None
+                sent, idle_since = None, None
 
         # websocket up: Plex pushes changes, so a slow safety poll is enough
         timeout = 30 if (watcher and watcher.connected) else cfg.poll
+        if idle_since is not None:
+            timeout = min(timeout, max(1.0, idle_since + CLEAR_GRACE - now))
         if wake.wait(timeout):
             wake.clear()
             time.sleep(0.5)  # Plex sends notifications in bursts

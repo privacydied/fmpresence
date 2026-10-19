@@ -31,7 +31,8 @@ through the local IPC socket. It does not need a Discord bot or a token.
 - A **View on Last.fm** button
 - Optional: movies and TV episodes as **Watching …** (`SHOW_VIDEO=1`)
 
-When nothing is playing, the presence is cleared. When Plex is paused, the
+When nothing has played for 8 seconds, the presence is cleared. The short
+wait stops it flickering between tracks. When Plex is paused, the
 presence is also cleared, unless you set `SHOW_PAUSED=1`.
 
 Discord shows the buttons to other people, not to you.
