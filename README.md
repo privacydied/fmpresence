@@ -29,6 +29,11 @@ through the local IPC socket. It does not need a Discord bot or a token.
   links to Spotify, Apple Music, YouTube, Tidal and others. It is shown only
   when the track is found in the Apple Music catalogue.
 - A **View on Last.fm** button
+- Clickable text: the track title opens the song.link page (or the Last.fm
+  track page), the artist opens the Last.fm artist page, and the album art opens
+  the Last.fm album page (`CLICKABLE=0` turns this off)
+- Your Last.fm play count on hover: "Dr*gs R Bad · played 37×" (`PLAYCOUNT=0`
+  turns this off)
 - Optional: movies and TV episodes as **Watching …** (`SHOW_VIDEO=1`)
 
 When nothing has played for 8 seconds, the presence is cleared. The short
@@ -79,11 +84,18 @@ network is not public, so fmpresence uses the first of these that works:
 
 If none of these has a cover, the presence is shown without an image.
 
+The service checks the proxy's `/health` URL through your CDN every 5 minutes
+(every minute while it is down). If the proxy does not answer, it uses Apple
+Music or Last.fm covers until the proxy is back. The log says when the proxy goes
+down and comes back.
+
 ### Art proxy (optional)
 
 `fmpresence serve-art` is a small HTTP server that serves Plex covers. Run it on
 a machine that can reach Plex, and make it reachable from the internet through
 your reverse proxy (for example `https://art.example.com` → `http://host:8765`).
+
+`/health` returns `ok` when the proxy can reach Plex, and `503` when it cannot.
 
 It serves only signed URLs. The main service signs each cover path with
 `ART_SECRET`, and the proxy refuses everything else. The proxy also accepts
@@ -120,6 +132,12 @@ To make a secret: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ## Setup
 
 ### 1. Install
+
+Arch Linux (AUR package `fmpresence-git`, or build it from this repo):
+
+```bash
+cd packaging/aur && makepkg -si
+```
 
 As a uv tool:
 
@@ -170,6 +188,33 @@ journalctl --user -u fmpresence -f
 
 To remove the service: `fmpresence uninstall`. This keeps your env file.
 
+### Check the setup
+
+```bash
+fmpresence doctor
+```
+
+This checks each part and prints `OK`, `FAIL` or `SKIP` with the reason: the env
+file and its mode, the config, the Discord IPC socket, the Plex server and your
+Plex user, the Plex websocket, Last.fm, iTunes, the art proxy through your CDN,
+and the systemd service. It exits with code 1 if a check fails. It reads the
+env file itself, so you can run it from any shell.
+
+### Hide the presence for a while
+
+```bash
+fmpresence pause     # hide now
+fmpresence resume    # show again
+fmpresence toggle    # for a hotkey
+```
+
+The service reacts at once (the command sends it `SIGUSR1`). The pause stays on
+until you resume or reboot. For example, in Hyprland:
+
+```ini
+bind = SUPER, F9, exec, fmpresence toggle
+```
+
 ### 4. Configure
 
 ```ini
@@ -197,6 +242,8 @@ POLL_SECONDS=15
 | `SHOW_PAUSED`         | `0`     | `1` keeps the presence while Plex is paused |
 | `SHOW_VIDEO`          | `0`     | `1` also shows movies and TV episodes from Plex |
 | `LINKS`               | `1`     | `0` turns off the iTunes lookup and the **Listen** button |
+| `CLICKABLE`           | `1`     | `0` turns off the links on the title, artist and album art |
+| `PLAYCOUNT`           | `1`     | `0` turns off the Last.fm play count in the album-art tooltip |
 | `ITUNES_COUNTRY`      | `us`    | iTunes store country used for the lookup |
 | `HIDE_ARTISTS`        |         | Artists to hide, separated by `\|` |
 | `HIDE_ALBUMS`         |         | Albums to hide, separated by `\|` |
@@ -224,6 +271,8 @@ playlists cannot be hidden.
 ```bash
 uv sync
 uv run pytest
+uvx ruff check fmpresence.py tests
+uv run --with pyright pyright
 ```
 
 The tests run offline. They use real API responses that are saved in
@@ -240,6 +289,9 @@ The tests run offline. They use real API responses that are saved in
 | It runs but Discord shows nothing | Turn on **Share my activity** in Discord. Check that the Discord desktop client is running (the browser version has no IPC). |
 | It never shows a track (Last.fm source) | Your player does not send "now playing" to Last.fm. Check your Last.fm profile while a track plays. Plex users: use the Plex source. |
 | No **Listen** button | The track is not in the Apple Music catalogue, or the match was not exact enough. |
+| No play count on hover | Last.fm counts plays per exact artist name. A track that was never scrobbled, or was scrobbled under another artist spelling, shows no count. |
 | `no album art found for …` | No source has a cover. Set up the [art proxy](#art-proxy-optional) to use your Plex covers. |
+| Something does not work | Run `fmpresence doctor` first. |
+| `art proxy … is down` in the log | `serve-art` is not running, or the reverse proxy or certificate is wrong. `fmpresence doctor` shows the HTTP code. |
 | Art proxy URL gives Cloudflare error 526 | The reverse proxy serves the wrong TLS certificate for the art hostname. Assign your Cloudflare Origin certificate to it (Synology: **Control Panel → Security → Certificate → Settings**). |
 | Updates take up to `POLL_SECONDS` | The websocket is not connected. Look for `plex websocket connected` in the log. |

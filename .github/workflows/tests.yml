@@ -13,6 +13,14 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --python ${{ matrix.python }}
       - run: uv run --python ${{ matrix.python }} pytest -q
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync
+      - run: uvx ruff check fmpresence.py tests
+      - run: uv run --with pyright pyright
   serve-art-py38:
     runs-on: ubuntu-latest
     steps:

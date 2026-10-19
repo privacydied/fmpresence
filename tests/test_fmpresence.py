@@ -220,7 +220,7 @@ def test_tracker_buttons():
 
 def test_tracker_hidden_clears():
     tr = f.Tracker(cfg(HIDE_ARTISTS="artist"))
-    changed, p = tr.step(track(), now=1)
+    _, p = tr.step(track(), now=1)
     assert p is None
 
 
@@ -236,6 +236,7 @@ def test_video_is_watching():
 def test_enrich_prefers_plex_proxy_then_itunes(monkeypatch, plex, user):
     monkeypatch.setattr(f, "itunes_lookup", lambda *a: {"art": "https://itunes/art.jpg", "link": "https://song.link/i/9"})
     monkeypatch.setattr(f, "lastfm_album_art", lambda *a: pytest.fail("should not need last.fm"))
+    monkeypatch.setattr(f, "art_proxy_ok", lambda c: True)
     t = f.enrich(cfg(), f.parse_plex_sessions(plex, user))
     assert t["art"] == "https://itunes/art.jpg" and t["link"] == "https://song.link/i/9"
     t = f.enrich(cfg(ART_BASE_URL="https://art.x", ART_SECRET="s"), f.parse_plex_sessions(plex, user))
@@ -254,3 +255,105 @@ def test_config_defaults():
     assert c.use_plex and not c.use_lastfm
     assert c.poll == 15 and c.lastfm_poll == 30 and c.status_display == "details"
     assert c.plex_websocket and not c.show_video and not c.spotify_icon
+
+
+# ---------------------------------------------------------------- v0.3
+
+def test_enrich_skips_proxy_when_down(monkeypatch, plex, user):
+    monkeypatch.setattr(f, "itunes_lookup", lambda *a: {"art": "https://itunes/art.jpg", "link": ""})
+    monkeypatch.setattr(f, "art_proxy_ok", lambda c: False)
+    t = f.enrich(cfg(ART_BASE_URL="https://art.x", ART_SECRET="s"), f.parse_plex_sessions(plex, user))
+    assert t["art"] == "https://itunes/art.jpg"
+
+
+def test_art_proxy_health_is_cached(monkeypatch):
+    calls = []
+
+    class R:
+        status = 200
+
+        def read(self, n):
+            return b"ok\n"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(f.urllib.request, "urlopen", lambda req, timeout: calls.append(req.full_url) or R())
+    f.CACHE.drop(("arthealth", "https://art.x"))
+    c = cfg(ART_BASE_URL="https://art.x", ART_SECRET="s")
+    assert f.art_proxy_ok(c) and f.art_proxy_ok(c)
+    assert calls == ["https://art.x/health"]
+
+
+def test_cache_ttl(monkeypatch):
+    c = f.Cache()
+    n = iter(range(10))
+    clock = [1000.0]
+    monkeypatch.setattr(f.time, "time", lambda: clock[0])
+    assert c.get(("k",), lambda: next(n), ttl=10) == 0
+    clock[0] += 5
+    assert c.get(("k",), lambda: next(n), ttl=10) == 0
+    clock[0] += 6
+    assert c.get(("k",), lambda: next(n), ttl=10) == 1
+
+
+def test_clickable_links():
+    _, p = f.Tracker(cfg()).step(track(link="https://song.link/i/1", url="https://last.fm/t", art="https://a/x.jpg",
+                                       artist="LUCKI, Veeze", album_artist="LUCKI", album="Dr*gs R Bad"), now=1)
+    assert p["details_url"] == "https://song.link/i/1"
+    assert p["state_url"] == "https://www.last.fm/music/LUCKI"
+    assert p["large_url"] == "https://www.last.fm/music/LUCKI/Dr%2Ags+R+Bad"
+    _, p = f.Tracker(cfg(CLICKABLE="0")).step(track(link="https://song.link/i/1"), now=1)
+    assert "details_url" not in p and "state_url" not in p
+
+
+def test_no_cover_link_without_cover():
+    _, p = f.Tracker(cfg()).step(track(art=""), now=1)
+    assert "large_url" not in p
+
+
+def test_hover_shows_playcount():
+    assert f.hover_text({"album": "656", "plays": 37}) == "656 · played 37×"
+    assert f.hover_text({"album": "", "plays": 3}) == "played 3×"
+    assert f.hover_text({"album": "656", "plays": 0}) == "656"
+    assert f.hover_text({}) is None
+
+
+def test_playcount_tries_raw_artist_then_main(monkeypatch):
+    seen = []
+
+    def fake(c, method, **p):
+        seen.append(p["artist"])
+        return {"track": {"userplaycount": "0" if p["artist"] == "A;B" else "12"}}
+
+    monkeypatch.setattr(f, "lastfm", fake)
+    c = cfg(LASTFM_USER="u", LASTFM_API_KEY="k")
+    t = track(artist="A, B", artist_raw="A;B", title="Song-playcount-test")
+    assert f.lastfm_playcount(c, t) == 12
+    assert seen == ["A;B", "A"]
+    assert f.lastfm_playcount(cfg(LASTFM_USER="u", LASTFM_API_KEY="k", PLAYCOUNT="0"), t) == 0
+
+
+def test_pause_toggle(monkeypatch, tmp_path):
+    monkeypatch.setattr(f, "PAUSE_FILE", tmp_path / "fmpresence.paused")
+    monkeypatch.setattr(f.subprocess, "run", lambda *a, **k: None)
+    f.set_paused(True)
+    assert f.PAUSE_FILE.exists()
+    f.set_paused(None)
+    assert not f.PAUSE_FILE.exists()
+    f.set_paused(None)
+    assert f.PAUSE_FILE.exists()
+    f.set_paused(False)
+    assert not f.PAUSE_FILE.exists()
+
+
+def test_env_file_loader(monkeypatch, tmp_path):
+    env = tmp_path / "env"
+    env.write_text("# comment\nPLEX_URL=http://x:32400\nEMPTY=\n")
+    monkeypatch.setattr(f, "ENV_FILE", env)
+    monkeypatch.delenv("PLEX_URL", raising=False)
+    d = f.load_env_file()
+    assert d["PLEX_URL"] == "http://x:32400" and d["EMPTY"] == ""

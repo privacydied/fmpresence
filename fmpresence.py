@@ -3,6 +3,10 @@
 
 Subcommands:
   run         poll the sources and update Discord (default)
+  doctor      check every part of the setup and print what is wrong
+  pause       hide the presence until resume (bind it to a hotkey)
+  resume      show the presence again
+  toggle      pause if running, resume if paused
   install     write the systemd --user unit + env template, enable the service
   uninstall   disable and remove the unit
   serve-art   small signed image proxy for Plex covers (run it next to Plex)
@@ -26,6 +30,7 @@ import sys
 import threading
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -44,6 +49,8 @@ CONFIG_DIR = _XDG / "fmpresence"
 ENV_FILE = CONFIG_DIR / "env"
 UNIT_DIR = _XDG / "systemd" / "user"
 UNIT_FILE = UNIT_DIR / "fmpresence.service"
+# per-boot pause flag: a reboot always resumes
+PAUSE_FILE = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/fmpresence-{os.getuid()}") / "fmpresence.paused"
 
 
 # ---------------------------------------------------------------- helpers
@@ -66,11 +73,20 @@ def lastfm_url(artist: str, title: str) -> str:
     return f"https://www.last.fm/music/{q(artist)}/_/{q(title)}"
 
 
+def lastfm_artist_url(artist: str) -> str:
+    return "https://www.last.fm/music/" + urllib.parse.quote_plus(artist.split(",")[0].strip())
+
+
+def lastfm_album_url(artist: str, album: str) -> str:
+    q = urllib.parse.quote_plus
+    return f"https://www.last.fm/music/{q(artist.split(',')[0].strip())}/{q(album)}" if album else ""
+
+
 def spotify_search_url(artist: str, title: str) -> str:
     return "https://open.spotify.com/search/" + urllib.parse.quote(f"{artist} {title}")
 
 
-def get_json(url: str, headers: dict = None, timeout: float = 10) -> dict:
+def get_json(url: str, headers: dict | None = None, timeout: float = 10) -> dict:
     h = {"User-Agent": "fmpresence/1.0", "Accept": "application/json"}
     h.update(headers or {})
     with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as r:
@@ -87,22 +103,30 @@ def _rules(v: str) -> set:
 
 
 class Cache:
-    """Memo for network lookups. Failures are cached too, so a miss costs one call."""
+    """Memo for network lookups. Failures are cached too, so a miss costs one call.
+
+    ttl: seconds before the value is fetched again (None = keep for the process lifetime).
+    """
 
     def __init__(self, size: int = 2000) -> None:
         self.size = size
         self.data: dict = {}
 
-    def get(self, key: tuple, fn):
-        if key not in self.data:
+    def get(self, key: tuple, fn, ttl: float | None = None):
+        hit = self.data.get(key)
+        if hit is None or (ttl is not None and time.time() - hit[1] > ttl):
             if len(self.data) >= self.size:
                 self.data.clear()
             try:
-                self.data[key] = fn()
+                value = fn()
             except Exception as e:
                 log.debug("lookup %s failed: %s", key, e)
-                self.data[key] = None
-        return self.data[key]
+                value = None
+            hit = self.data[key] = (value, time.time())
+        return hit[0]
+
+    def drop(self, key: tuple) -> None:
+        self.data.pop(key, None)
 
 
 CACHE = Cache()
@@ -132,6 +156,8 @@ class Config:
         self.status_display = g("STATUS_DISPLAY", "details").lower()
         self.itunes_country = g("ITUNES_COUNTRY", "us").lower()
         self.links = _bool(g("LINKS", "1"))
+        self.clickable = _bool(g("CLICKABLE", "1"))
+        self.playcount = _bool(g("PLAYCOUNT", "1"))
         self.art_base_url = g("ART_BASE_URL").rstrip("/")
         self.art_secret = g("ART_SECRET")
         self.art_listen = g("ART_LISTEN", "0.0.0.0:8765")
@@ -218,6 +244,7 @@ def parse_lastfm_recent(data: dict):
         "thumb": "",
         "art": lastfm_image(t.get("image", [])),
         "url": t.get("url") or lastfm_url(artist, title),
+        "artist_raw": t["artist"]["#text"],
         "paused": False,
         "duration": 0,
         "offset": None,  # unknown: count from when we first saw it
@@ -227,10 +254,11 @@ def parse_lastfm_recent(data: dict):
 def lastfm_now_playing(cfg: Config):
     t = parse_lastfm_recent(lastfm(cfg, "user.getrecenttracks", user=cfg.lastfm_user, limit="1"))
     if t:
-        ms = CACHE.get(
-            ("dur", t["artist"], t["title"]),
-            lambda: int(lastfm(cfg, "track.getInfo", artist=t["artist"], track=t["title"], autocorrect="1")["track"].get("duration") or 0),
-        )
+        def duration_ms() -> int:
+            info = lastfm(cfg, "track.getInfo", artist=t["artist"], track=t["title"], autocorrect="1")
+            return int(info["track"].get("duration") or 0)
+
+        ms = CACHE.get(("dur", t["artist"], t["title"]), duration_ms)
         t["duration"] = (ms or 0) // 1000
     return t
 
@@ -242,7 +270,8 @@ def lastfm_album_art(cfg: Config, artist: str, album: str, title: str) -> str:
     def look() -> str:
         if album:
             try:
-                art = lastfm_image(lastfm(cfg, "album.getInfo", artist=artist, album=album, autocorrect="1")["album"].get("image", []))
+                info = lastfm(cfg, "album.getInfo", artist=artist, album=album, autocorrect="1")
+                art = lastfm_image(info["album"].get("image", []))
                 if art:
                     return art
             except Exception:
@@ -251,6 +280,48 @@ def lastfm_album_art(cfg: Config, artist: str, album: str, title: str) -> str:
         return lastfm_image(t.get("album", {}).get("image", []))
 
     return CACHE.get(("lfmart", artist, album, title), look) or ""
+
+
+def lastfm_playcount(cfg: Config, t: dict) -> int:
+    """How many times the Last.fm user has scrobbled this track (0 if unknown)."""
+    if not (cfg.playcount and cfg.use_lastfm) or t["kind"] != "music":
+        return 0
+
+    def look() -> int:
+        # Plex scrobbles the raw artist string ("A;B"); try that first, then the main artist
+        for artist in dict.fromkeys(a for a in (t.get("artist_raw"), t["artist"].split(",")[0]) if a):
+            info = lastfm(cfg, "track.getInfo", artist=artist, track=t["title"], username=cfg.lastfm_user, autocorrect="1")
+            n = int(info.get("track", {}).get("userplaycount") or 0)
+            if n:
+                return n
+        return 0
+
+    return CACHE.get(("plays", t.get("artist_raw") or t["artist"], t["title"]), look, ttl=600) or 0
+
+
+# ---------------------------------------------------------------- art proxy health
+
+_art_up = None  # last known state, for logging changes only
+
+
+def art_proxy_ok(cfg: Config) -> bool:
+    """Is the public art proxy answering (through the CDN, so a TLS/route problem counts as down)?"""
+    global _art_up
+
+    def probe() -> bool:
+        req = urllib.request.Request(cfg.art_base_url + "/health", headers={"User-Agent": "fmpresence/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.status == 200 and r.read(16).strip() == b"ok"
+
+    # re-check every 5 min while up, every minute while down
+    ok = bool(CACHE.get(("arthealth", cfg.art_base_url), probe, ttl=300 if _art_up else 60))
+    if ok != _art_up:
+        if ok:
+            log.info("art proxy %s is up", cfg.art_base_url)
+        else:
+            log.warning("art proxy %s is down; using iTunes/Last.fm art", cfg.art_base_url)
+        _art_up = ok
+    return ok
 
 
 # ---------------------------------------------------------------- iTunes (art + song.link)
@@ -322,6 +393,7 @@ def parse_plex_sessions(data: dict, user: str, show_video: bool = False):
         artist = split_artists(m.get("originalTitle", "")) or album_artist
         title = m.get("title", "")
         return dict(base, kind="music", title=title, artist=artist, album_artist=album_artist or artist,
+                    artist_raw=m.get("originalTitle") or m.get("grandparentTitle") or "",
                     album=m.get("parentTitle", ""), thumb=m.get("parentThumb") or m.get("thumb") or "",
                     url=lastfm_url(artist, title))
     if m["type"] == "episode":
@@ -396,7 +468,7 @@ def hidden(cfg: Config, t: dict) -> bool:
 def enrich(cfg: Config, t: dict) -> dict:
     """Fill art + link. Art order: own Plex cover (if the proxy is set) > iTunes > Last.fm."""
     t.setdefault("link", "")
-    if t.get("thumb"):
+    if t.get("thumb") and cfg.art_base_url and cfg.art_secret and art_proxy_ok(cfg):
         t["art"] = plex_art_url(cfg, t["thumb"]) or t.get("art", "")
     if t["kind"] != "music":
         return t
@@ -408,6 +480,7 @@ def enrich(cfg: Config, t: dict) -> dict:
                 t["link"] = it["link"]
     if not t["art"] and t["source"] == "plex":
         t["art"] = lastfm_album_art(cfg, t["album_artist"], t["album"], t["title"])
+    t["plays"] = lastfm_playcount(cfg, t)
     return t
 
 
@@ -419,6 +492,15 @@ def clip(s: str, n: int = 128) -> str:
     if len(s) < 2:
         s = (s + "  ")[:2]
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def hover_text(t: dict):
+    """Album-art tooltip: "Album · played 37×"."""
+    parts = [t.get("album") or ""]
+    if t.get("plays"):
+        parts.append(f"played {t['plays']}×")
+    text = " · ".join(p for p in parts if p)
+    return clip(text) if text else None
 
 
 class Tracker:
@@ -458,15 +540,22 @@ class Tracker:
 
         c = self.cfg
         video = t["kind"] == "video"
-        display = {"name": StatusDisplayType.NAME, "state": StatusDisplayType.STATE}.get(c.status_display, StatusDisplayType.DETAILS)
-        kw = dict(
+        displays = {"name": StatusDisplayType.NAME, "state": StatusDisplayType.STATE}
+        display = displays.get(c.status_display, StatusDisplayType.DETAILS)
+        kw: dict = dict(
             activity_type=ActivityType.WATCHING if video else ActivityType.LISTENING,
             status_display_type=display,
             details=clip(t["title"]),
             state=clip(t["artist"] + (" · paused" if t["paused"] else "")),
             large_image=t.get("art") or None,
-            large_text=clip(t["album"]) if t.get("album") else None,
+            large_text=hover_text(t),
         )
+        if c.clickable and not video:
+            # title -> song.link (or Last.fm track), artist -> Last.fm artist, cover -> Last.fm album
+            kw["details_url"] = t.get("link") or t.get("url") or None
+            kw["state_url"] = lastfm_artist_url(t["artist"]) if t.get("artist") else None
+            album_url = lastfm_album_url(t.get("album_artist") or t["artist"], t.get("album", ""))
+            kw["large_url"] = album_url if (album_url and t.get("art")) else None
         buttons = []
         if t.get("link"):
             buttons.append({"label": "Listen", "url": t["link"]})
@@ -495,7 +584,7 @@ class RPC:
         if self.rpc:
             return True
         try:
-            from pypresence import Presence
+            from pypresence.presence import Presence
 
             rpc = Presence(self.client_id)
             rpc.connect()
@@ -553,6 +642,8 @@ def run(cfg: Config) -> int:
     rpc = RPC(cfg.discord_client_id)
     tracker = Tracker(cfg)
     signal.signal(signal.SIGTERM, lambda *_: (rpc.call("clear"), rpc.drop(), sys.exit(0)))
+    signal.signal(signal.SIGUSR1, lambda *_: wake.set())  # pause/resume: re-check now
+    was_paused = False
 
     sent = None  # last payload Discord accepted (None = cleared)
     sent_at = 0.0
@@ -584,14 +675,22 @@ def run(cfg: Config) -> int:
             continue
         backoff = cfg.poll
 
+        paused = PAUSE_FILE.exists()
+        if paused != was_paused:
+            log.info("paused by user" if paused else "resumed")
+            was_paused = paused
+        if paused:
+            track = None
+            if sent is not None:
+                idle_since = now - CLEAR_GRACE  # clear at once, no grace
         if track:
             track = enrich(cfg, track)
-            if not track.get("art"):
-                CACHE.get(("noart", track["id"]),
-                          lambda: log.info("no album art found for %s - %s", track["artist"], track["title"]))
+            if not track.get("art") and ("noart", track["id"]) not in CACHE.data:
+                CACHE.data[("noart", track["id"])] = (True, now)
+                log.info("no album art found for %s - %s", track["artist"], track["title"])
         changed, payload = tracker.step(track, now)
 
-        if payload is not None:
+        if payload is not None and track is not None:
             # send on change, plus a 30 s keepalive (also notices a restarted Discord)
             if payload != sent or now - sent_at > 30:
                 if rpc.call("update", **payload):
@@ -630,10 +729,26 @@ def serve_art(cfg: Config) -> int:
     class Handler(BaseHTTPRequestHandler):
         server_version = "fmpresence-art"
 
-        def log_message(self, fmt, *args):
-            log.debug("%s %s", self.address_string(), fmt % args)
+        def log_message(self, format, *args):  # noqa: A002 (base class name)
+            log.debug("%s %s", self.address_string(), format % args)
 
         def do_GET(self):
+            if self.path.split("?", 1)[0] == "/health":
+                # healthy = this proxy answers and can reach Plex
+                try:
+                    req = urllib.request.Request(f"{cfg.plex_url}/identity", headers={"X-Plex-Token": cfg.plex_token})
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        ok = r.status == 200
+                except Exception:
+                    ok = False
+                body = b"ok\n" if ok else b"plex unreachable\n"
+                self.send_response(200 if ok else 503)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             m = re.match(r"^/a/([A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)\.jpg$", self.path.split("?", 1)[0])
             thumb = art_verify(cfg.art_secret, m.group(1)) if m else None
             if not thumb:
@@ -667,6 +782,126 @@ def serve_art(cfg: Config) -> int:
     log.info("serving signed Plex covers on %s", cfg.art_listen)
     srv.serve_forever()
     return 0
+
+
+# ---------------------------------------------------------------- pause / resume
+
+def set_paused(paused) -> int:
+    """paused: True, False, or None to toggle. Signals the service so it reacts at once."""
+    if paused is None:
+        paused = not PAUSE_FILE.exists()
+    PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if paused:
+        PAUSE_FILE.touch()
+    else:
+        PAUSE_FILE.unlink(missing_ok=True)
+    subprocess.run(["systemctl", "--user", "kill", "-s", "USR1", "fmpresence"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    print("paused" if paused else "resumed")
+    return 0
+
+
+# ---------------------------------------------------------------- doctor
+
+def doctor(cfg: Config) -> int:
+    """Check every part of the setup. Exit 1 if anything failed."""
+    results = []
+
+    def check(name: str, fn) -> None:
+        try:
+            ok, detail = fn()
+        except Exception as e:
+            ok, detail = False, f"{type(e).__name__}: {e}"
+        results.append(ok)
+        mark = "\033[32mOK  \033[0m" if ok is True else ("\033[33mSKIP\033[0m" if ok is None else "\033[31mFAIL\033[0m")
+        print(f"{mark} {name:<16} {detail}")
+
+    def env_file():
+        if not ENV_FILE.exists():
+            return False, f"{ENV_FILE} missing (run: fmpresence install)"
+        mode = ENV_FILE.stat().st_mode & 0o777
+        return mode & 0o077 == 0, f"{ENV_FILE} mode {mode:o}" + ("" if mode & 0o077 == 0 else " (should be 600)")
+
+    def config():
+        if not cfg.discord_client_id:
+            return False, "DISCORD_CLIENT_ID is empty"
+        if not (cfg.use_plex or cfg.use_lastfm):
+            return False, "no source: set PLEX_URL+PLEX_TOKEN and/or LASTFM_USER+LASTFM_API_KEY"
+        return True, "sources: " + ", ".join(n for n, on in (("plex", cfg.use_plex), ("last.fm", cfg.use_lastfm)) if on)
+
+    def discord():
+        run_dir = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
+        socks = sorted(str(p) for p in run_dir.glob("discord-ipc-*")) + sorted(
+            str(p) for p in run_dir.glob("app/*/discord-ipc-*"))
+        if not socks:
+            return False, f"no discord-ipc socket in {run_dir} (is the Discord desktop app running?)"
+        if not cfg.discord_client_id:
+            return None, socks[0]
+        from pypresence.presence import Presence
+
+        rpc = Presence(cfg.discord_client_id)
+        rpc.connect()
+        rpc.close()
+        return True, f"handshake ok via {socks[0]}"
+
+    def plex():
+        if not cfg.use_plex:
+            return None, "not configured"
+        ident = get_json(f"{cfg.plex_url}/identity", {"X-Plex-Token": cfg.plex_token})["MediaContainer"]
+        user = cfg.plex_user or plex_owner(cfg)
+        t = plex_now_playing(cfg, user)
+        now = f"playing {t['artist']} - {t['title']}" if t else "nothing playing"
+        return True, f"server {ident.get('version')}, user {user}, {now}"
+
+    def websocket():
+        if not (cfg.use_plex and cfg.plex_websocket):
+            return None, "off"
+        from websockets.sync.client import connect
+
+        url = re.sub(r"^http", "ws", cfg.plex_url) + "/:/websockets/notifications"
+        with connect(url, additional_headers={"X-Plex-Token": cfg.plex_token}, open_timeout=8):
+            pass
+        return True, "connected"
+
+    def lastfm_check():
+        if not cfg.use_lastfm:
+            return None, "not configured"
+        u = lastfm(cfg, "user.getinfo", user=cfg.lastfm_user)["user"]
+        return True, f"user {u.get('name')}, {int(u.get('playcount') or 0):,} scrobbles"
+
+    def itunes():
+        if not cfg.links:
+            return None, "LINKS=0"
+        n = get_json(f"{ITUNES_API}?term=radiohead+creep&entity=song&limit=1").get("resultCount", 0)
+        return n > 0, "search ok" if n else "no results"
+
+    def art():
+        if not cfg.art_base_url:
+            return None, "ART_BASE_URL not set (covers come from iTunes/Last.fm)"
+        if not cfg.art_secret:
+            return False, "ART_BASE_URL is set but ART_SECRET is empty"
+        req = urllib.request.Request(cfg.art_base_url + "/health", headers={"User-Agent": "fmpresence/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                body = r.read(64).decode(errors="ignore").strip()
+        except urllib.error.HTTPError as e:
+            hint = {526: "CDN rejects the origin TLS certificate", 502: "proxy not running?",
+                    503: "proxy cannot reach Plex", 404: "route goes to the wrong backend"}.get(e.code, "")
+            return False, f"/health -> HTTP {e.code} {hint}".strip()
+        return body == "ok", f"/health -> {body}"
+
+    def service():
+        r = subprocess.run(["systemctl", "--user", "is-active", "fmpresence"], capture_output=True, text=True)
+        e = subprocess.run(["systemctl", "--user", "is-enabled", "fmpresence"], capture_output=True, text=True)
+        state, enabled = r.stdout.strip() or "unknown", e.stdout.strip() or "unknown"
+        paused = " (paused by user)" if PAUSE_FILE.exists() else ""
+        return state == "active", f"{state}, {enabled}{paused}"
+
+    for name, fn in (("env file", env_file), ("config", config), ("discord", discord), ("plex", plex),
+                     ("plex websocket", websocket), ("last.fm", lastfm_check), ("itunes", itunes),
+                     ("art proxy", art), ("service", service)):
+        check(name, fn)
+    return 1 if any(r is False for r in results) else 0
 
 
 # ---------------------------------------------------------------- install
@@ -740,6 +975,18 @@ def uninstall() -> int:
     return 0
 
 
+def load_env_file() -> dict:
+    """os.environ plus the env file, for commands run outside systemd (doctor)."""
+    env = dict(os.environ)
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env.setdefault(k.strip(), v.strip())
+    return env
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     cmd = argv[0] if argv else "run"
@@ -757,6 +1004,11 @@ def main(argv=None) -> int:
         return uninstall()
     if cmd == "serve-art":
         return serve_art(Config())
+    if cmd in ("pause", "resume", "toggle"):
+        return set_paused({"pause": True, "resume": False, "toggle": None}[cmd])
+    if cmd == "doctor":
+        logging.getLogger().setLevel(logging.WARNING)
+        return doctor(Config(load_env_file()))
     if cmd == "run":
         return run(Config())
     print(f"unknown command: {cmd}\n{__doc__}", file=sys.stderr)
