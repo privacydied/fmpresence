@@ -84,6 +84,11 @@ network is not public, so fmpresence uses the first of these that works:
 
 If none of these has a cover, the presence is shown without an image.
 
+When a new cover appears, the service fetches it once through the CDN before it
+updates Discord (it waits at most 3 seconds). The first request for a cover makes
+Plex resize the image, and Discord can give up before that finishes. After this
+first fetch, the CDN has the cover ready.
+
 The service checks the proxy's `/health` URL through your CDN every 5 minutes
 (every minute while it is down). If the proxy does not answer, it uses Apple
 Music or Last.fm covers until the proxy is back. The log says when the proxy goes
@@ -107,6 +112,16 @@ token never appears in a URL.
 PLEX_URL=http://localhost:32400 PLEX_TOKEN=... ART_SECRET=long-random-string \
   python3 fmpresence.py serve-art
 ```
+
+To keep it running, use one of the files in `packaging/serve-art/`:
+
+- **Docker:** copy `art.env.example` to `art.env` (mode 600), fill it in, then
+  run `docker compose -f packaging/serve-art/compose.yaml up -d --build`. The
+  container runs as a non-root user with a read-only file system and no
+  capabilities. It has a health check on `/health`.
+- **systemd:** `fmpresence-art.service` is a system unit with `DynamicUser` and
+  strict sandboxing. The install commands are in the comment at the top of the
+  file.
 
 Then add the same secret and the public URL to the env file of the main service:
 

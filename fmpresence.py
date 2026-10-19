@@ -447,6 +447,30 @@ class PlexWatcher(threading.Thread):
             backoff = min(backoff * 2, 300)
 
 
+def warm_art(cfg: Config, url: str):
+    """Fetch a proxy cover once, so the CDN has it before Discord asks.
+
+    A cold request makes Plex resize the image first; Discord can give up before that finishes.
+    Returns the fetch thread for a new cover (the caller waits briefly), else None.
+    """
+    if not (cfg.art_base_url and url.startswith(cfg.art_base_url + "/a/")) or ("warm", url) in CACHE.data:
+        return None
+    CACHE.data[("warm", url)] = (True, time.time())
+
+    def fetch() -> None:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "fmpresence/1.0"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                r.read()
+            log.debug("warmed %s", url)
+        except Exception as e:
+            log.debug("warming %s failed: %s", url, e)
+
+    th = threading.Thread(target=fetch, daemon=True, name="warm-art")
+    th.start()
+    return th
+
+
 # ---------------------------------------------------------------- enrich / filter
 
 def hidden(cfg: Config, t: dict) -> bool:
@@ -685,6 +709,9 @@ def run(cfg: Config) -> int:
                 idle_since = now - CLEAR_GRACE  # clear at once, no grace
         if track:
             track = enrich(cfg, track)
+            warming = warm_art(cfg, track["art"]) if track.get("art") else None
+            if warming:
+                warming.join(3)  # new cover: give the CDN a head start, but never hold the update long
             if not track.get("art") and ("noart", track["id"]) not in CACHE.data:
                 CACHE.data[("noart", track["id"])] = (True, now)
                 log.info("no album art found for %s - %s", track["artist"], track["title"])

@@ -1,0 +1,37 @@
+# fmpresence serve-art as a system service.
+#   sudo install -Dm644 fmpresence.py /opt/fmpresence/fmpresence.py
+#   sudo install -Dm600 /dev/null /etc/fmpresence/art.env   # then add PLEX_URL, PLEX_TOKEN, ART_SECRET
+#   sudo install -Dm644 packaging/serve-art/fmpresence-art.service /etc/systemd/system/fmpresence-art.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fmpresence-art
+[Unit]
+Description=fmpresence serve-art: signed Plex cover proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/fmpresence/art.env
+Environment=ART_LISTEN=127.0.0.1:8765 PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/fmpresence/fmpresence.py serve-art
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=2
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

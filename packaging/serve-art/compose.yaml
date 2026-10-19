@@ -1,0 +1,21 @@
+# docker compose -f packaging/serve-art/compose.yaml up -d --build
+# Needs PLEX_URL, PLEX_TOKEN and ART_SECRET in packaging/serve-art/art.env (mode 600).
+services:
+  fmpresence-art:
+    build:
+      context: ../..
+      dockerfile: packaging/serve-art/Dockerfile
+    image: fmpresence-art
+    container_name: fmpresence-art
+    restart: unless-stopped
+    env_file: art.env
+    ports:
+      - "127.0.0.1:8765:8765"   # only your reverse proxy should reach it
+    # If /health says "plex unreachable", the container cannot reach Plex on your LAN
+    # (some host firewalls block bridge -> LAN). Then remove "ports" and use:
+    # network_mode: host
+    # environment:
+    #   ART_LISTEN: 127.0.0.1:8765
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]

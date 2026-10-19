@@ -357,3 +357,28 @@ def test_env_file_loader(monkeypatch, tmp_path):
     monkeypatch.delenv("PLEX_URL", raising=False)
     d = f.load_env_file()
     assert d["PLEX_URL"] == "http://x:32400" and d["EMPTY"] == ""
+
+
+def test_warm_art_only_proxy_urls_once(monkeypatch):
+    fetched = []
+
+    class R:
+        def read(self):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(f.urllib.request, "urlopen", lambda req, timeout: fetched.append(req.full_url) or R())
+    c = cfg(ART_BASE_URL="https://art.x", ART_SECRET="s")
+    url = "https://art.x/a/abc.def.jpg"
+    f.CACHE.drop(("warm", url))
+    th = f.warm_art(c, url)
+    assert th is not None
+    th.join(2)
+    assert f.warm_art(c, url) is None  # already warmed
+    assert f.warm_art(c, "https://itunes/art.jpg") is None  # not ours
+    assert fetched == [url]
