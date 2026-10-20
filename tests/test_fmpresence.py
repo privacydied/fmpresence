@@ -382,3 +382,70 @@ def test_warm_art_only_proxy_urls_once(monkeypatch):
     assert f.warm_art(c, url) is None  # already warmed
     assert f.warm_art(c, "https://itunes/art.jpg") is None  # not ours
     assert fetched == [url]
+
+
+# ---------------------------------------------------------------- Pocket Casts
+
+PC_EP = {"uuid": "ep1", "podcastUuid": "pod1", "title": "BONUS: Who Moves America", "podcastTitle": "Chapo Trap House",
+         "author": "Chapo Trap House", "duration": 2815, "playedUpTo": 22, "playingStatus": 2}
+
+
+def pc_cfg(**kw):
+    return cfg(POCKETCASTS_EMAIL="a@b", POCKETCASTS_PASSWORD="x", **kw)
+
+
+def test_pocketcasts_startup_waits_for_movement():
+    pc = f.PocketCasts(pc_cfg())
+    t = pc.step(dict(PC_EP), now=1000)
+    assert t["paused"]  # last episode from hours ago is not "playing"
+    t = pc.step(dict(PC_EP, playedUpTo=33), now=1010)
+    assert not t["paused"] and t["offset"] == 33
+
+
+def test_pocketcasts_new_episode_on_top_is_playing():
+    pc = f.PocketCasts(pc_cfg())
+    pc.step(dict(PC_EP), now=1000)
+    t = pc.step(dict(PC_EP, uuid="ep2", playedUpTo=0), now=1015)
+    assert not t["paused"] and t["id"] == "pocketcasts:ep2"
+
+
+def test_pocketcasts_pause_after_idle():
+    pc = f.PocketCasts(pc_cfg())
+    pc.step(dict(PC_EP), now=1000)
+    pc.step(dict(PC_EP, playedUpTo=40), now=1015)
+    assert not pc.step(dict(PC_EP, playedUpTo=40), now=1015 + f.POCKETCASTS_IDLE)["paused"]
+    assert pc.step(dict(PC_EP, playedUpTo=40), now=1016 + f.POCKETCASTS_IDLE)["paused"]
+
+
+def test_pocketcasts_offset_counts_since_last_save():
+    pc = f.PocketCasts(pc_cfg())
+    pc.step(dict(PC_EP), now=1000)
+    pc.step(dict(PC_EP, playedUpTo=100), now=1010)
+    assert pc.step(dict(PC_EP, playedUpTo=100), now=1018)["offset"] == 108
+
+
+def test_pocketcasts_payload():
+    pc = f.PocketCasts(pc_cfg())
+    pc.step(dict(PC_EP), now=1000)
+    t = f.enrich(pc_cfg(), pc.step(dict(PC_EP, playedUpTo=60), now=1010))
+    _, p = f.Tracker(pc_cfg()).step(t, now=1010)
+    assert p["name"] == "Pocket Casts"
+    assert p["details"] == "BONUS: Who Moves America" and p["state"] == "Chapo Trap House"
+    assert p["large_image"] == "https://static.pocketcasts.com/discover/images/400/pod1.jpg"
+    assert p["buttons"] == [{"label": "Open in Pocket Casts", "url": "https://pca.st/episode/ep1"}]
+    assert p["details_url"] == "https://pca.st/episode/ep1" and p["state_url"] == "https://pca.st/podcast/pod1"
+    assert p["start"] == 950 and p["end"] == 950 + 2815
+    _, p = f.Tracker(pc_cfg(APP_NAME="Plex")).step(t, now=1010)
+    assert p["name"] == "Plex"
+
+
+def test_pocketcasts_progress_bar_tolerates_save_jitter():
+    tr = f.Tracker(pc_cfg())
+    t = f.pocketcasts_track(dict(PC_EP), True, 100.0)
+    _, p = tr.step(t, now=1000)
+    _, p2 = tr.step(dict(t, offset=118.0), now=1008)  # saves lag up to ~10 s
+    assert p2["start"] == p["start"]
+
+
+def test_config_pocketcasts_flag():
+    assert pc_cfg().use_pocketcasts and not cfg().use_pocketcasts

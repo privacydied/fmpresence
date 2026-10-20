@@ -4,15 +4,17 @@
 
 Shows what you are playing as a Discord Rich Presence (**Listening to …**).
 
-It has two sources:
+It has three sources:
 
 - **Plex** (recommended for Plex users): reads your Plex Media Server session
   directly. A websocket tells it about play, pause, seek and stop as they
   happen, so the presence updates at once and the progress is exact.
+- **Pocket Casts**: shows the podcast episode you are playing, as
+  **Listening to Pocket Casts**. See [Pocket Casts](#pocket-casts).
 - **Last.fm**: works with any player that sends **now playing** to Last.fm.
 
-When both are configured, Plex is checked first. Last.fm is used only when
-nothing is playing on Plex.
+The order is: playing on Plex, then playing on Pocket Casts, then paused on
+Plex, then paused on Pocket Casts. Last.fm is used only when nothing else is on.
 
 It runs as a `systemd --user` service. It talks to the Discord desktop client
 through the local IPC socket. It does not need a Discord bot or a token.
@@ -71,6 +73,37 @@ Error handling:
 - **All sources fail:** it waits longer after each failure (exponential backoff,
   maximum 5 minutes).
 - **Config is missing:** it exits with code 2. systemd does not restart it.
+
+## Pocket Casts
+
+Pocket Casts has no official API. fmpresence uses the unofficial API that the
+Pocket Casts web player uses (`api.pocketcasts.com`). It can stop working if
+Pocket Casts changes it.
+
+The API has no "now playing" flag. fmpresence works it out like this:
+
+- While an episode plays, the Pocket Casts apps save your position about every
+  10 seconds. fmpresence reads your most recent in-progress episode every 15
+  seconds. If the position moved, the episode is playing.
+- If the position does not move for 40 seconds, the episode is paused. So the
+  presence clears up to about a minute after you pause.
+- An episode that moves to the top of the list while fmpresence is running was
+  just started, so it shows at once. When fmpresence starts, it waits until it
+  sees the position move.
+
+The card shows the episode title, the podcast name, the podcast cover and the
+progress. The title and the **Open in Pocket Casts** button open the episode
+page. The podcast name and the cover open the podcast page.
+
+To use it, add your Pocket Casts login to the env file (mode 600):
+
+```ini
+POCKETCASTS_EMAIL=you@example.com
+POCKETCASTS_PASSWORD=your_password
+```
+
+Accounts that sign in only with Google or Apple have no password, so they cannot
+use this source. To hide a podcast, put its name in `HIDE_ARTISTS`.
 
 ## Album art
 
@@ -249,6 +282,8 @@ POLL_SECONDS=15
 | `PLEX_TOKEN`          | \*      | Plex token |
 | `PLEX_USER`           | token owner | Plex username whose session is shown |
 | `PLEX_WEBSOCKET`      | `1`     | `0` turns off the websocket (polling only) |
+| `POCKETCASTS_EMAIL`   | \*      | Pocket Casts account email |
+| `POCKETCASTS_PASSWORD`| \*      | Pocket Casts account password |
 | `LASTFM_USER`         | \*      | Last.fm username |
 | `LASTFM_API_KEY`      | \*      | Last.fm API key (also used for album art) |
 | `POLL_SECONDS`        | `15`    | Poll interval without the websocket (minimum 5) |
@@ -272,8 +307,9 @@ POLL_SECONDS=15
 | `SPOTIFY_ICON_URL`    | grey logo in `assets/` | Public image URL for that icon |
 | `LOG_LEVEL`           | `INFO`  | Python log level |
 
-\* You need at least one source: `PLEX_URL` with `PLEX_TOKEN`, or
-`LASTFM_USER` with `LASTFM_API_KEY`.
+\* You need at least one source: `PLEX_URL` with `PLEX_TOKEN`,
+`POCKETCASTS_EMAIL` with `POCKETCASTS_PASSWORD`, or `LASTFM_USER` with
+`LASTFM_API_KEY`.
 
 The hide lists use `|` as the separator, because artist and album names often
 contain commas. Matching ignores case, accents and punctuation. For a track
@@ -298,6 +334,8 @@ The tests run offline. They use real API responses that are saved in
 | Symptom | Cause and fix |
 |---------|---------------|
 | `need DISCORD_CLIENT_ID plus …` and the service stops | A required variable in `~/.config/fmpresence/env` is empty. |
+| `pocket casts: HTTP Error 401` | The Pocket Casts email or password is wrong. |
+| Pocket Casts episode shows late or stays after a pause | Expected. Pocket Casts only saves your position about every 10 seconds, so playing and pausing are seen up to about a minute late. |
 | `plex: HTTP Error 401` | The Plex token is wrong or expired. |
 | Plex plays but nothing shows | The session belongs to a different Plex user. Set `PLEX_USER` to the username in the Plex session. |
 | `last.fm …: Invalid API key` | The API key is wrong. Check `LASTFM_API_KEY`. |

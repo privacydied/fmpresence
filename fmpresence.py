@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fmpresence: what you play on Plex (or Last.fm) as a Discord Rich Presence.
+"""fmpresence: what you play on Plex, Pocket Casts or Last.fm as a Discord Rich Presence.
 
 Subcommands:
   run         poll the sources and update Discord (default)
@@ -39,6 +39,9 @@ log = logging.getLogger("fmpresence")
 
 LASTFM_API = "https://ws.audioscrobbler.com/2.0/"
 ITUNES_API = "https://itunes.apple.com/search"
+POCKETCASTS_API = "https://api.pocketcasts.com"
+# Pocket Casts saves the position about every 10 s while it plays; no change for this long = paused
+POCKETCASTS_IDLE = 40
 # Last.fm's grey-star placeholder when a track has no art
 LASTFM_PLACEHOLDER = "2a96cbd8b46e442fc41c2b86b821562f"
 CLEAR_GRACE = 8  # seconds of "nothing playing" before the presence is cleared
@@ -142,6 +145,8 @@ class Config:
             return (e.get(k) or d).strip()
 
         self.discord_client_id = g("DISCORD_CLIENT_ID")
+        self.pocketcasts_email = g("POCKETCASTS_EMAIL")
+        self.pocketcasts_password = g("POCKETCASTS_PASSWORD")
         self.lastfm_user = g("LASTFM_USER")
         self.lastfm_api_key = g("LASTFM_API_KEY")
         self.plex_url = g("PLEX_URL").rstrip("/")
@@ -173,6 +178,10 @@ class Config:
     @property
     def use_plex(self) -> bool:
         return bool(self.plex_url and self.plex_token)
+
+    @property
+    def use_pocketcasts(self) -> bool:
+        return bool(self.pocketcasts_email and self.pocketcasts_password)
 
     @property
     def use_lastfm(self) -> bool:
@@ -471,6 +480,97 @@ def warm_art(cfg: Config, url: str):
     return th
 
 
+# ---------------------------------------------------------------- Pocket Casts (unofficial API)
+
+def pocketcasts_track(e: dict, playing: bool, offset: float) -> dict:
+    uuid, pod = e.get("uuid", ""), e.get("podcastUuid", "")
+    return {
+        "kind": "podcast",
+        "source": "pocketcasts",
+        "id": f"pocketcasts:{uuid}",
+        "title": e.get("title", ""),
+        "artist": e.get("podcastTitle", "") or e.get("author", ""),
+        "album_artist": "",
+        "album": e.get("author", "") if e.get("author") != e.get("podcastTitle") else "",
+        "library": "",
+        "thumb": "",
+        "art": f"https://static.pocketcasts.com/discover/images/400/{pod}.jpg" if pod else "",
+        "url": f"https://pca.st/episode/{uuid}" if uuid else "",
+        "url_label": "Open in Pocket Casts",
+        "artist_url": f"https://pca.st/podcast/{pod}" if pod else "",
+        "link": "",
+        "paused": not playing,
+        "duration": int(e.get("duration") or 0),
+        "offset": offset,
+        # positions arrive every ~10 s, so allow more jitter before moving the progress bar
+        "drift": 15,
+    }
+
+
+class PocketCasts:
+    """Watches the most recent in-progress episode. Playing = its saved position keeps moving.
+
+    The API has no "now playing" flag. While an episode plays, the apps save the position about
+    every 10 s; when it pauses, the saves stop. An episode that jumps to the top of the list
+    while we are watching was just started.
+    """
+
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.token = ""
+        self.token_until = 0.0
+        self.last_uuid = None
+        self.last_pos = None
+        self.moved_at = 0.0  # when we last saw the position change (or a new episode start)
+
+    def login(self) -> None:
+        body = {"email": self.cfg.pocketcasts_email, "password": self.cfg.pocketcasts_password, "scope": "webplayer"}
+        d = self._post("/user/login_pocket_casts", body, auth=False)
+        self.token = d.get("accessToken") or d.get("token") or ""
+        if not self.token:
+            raise RuntimeError("pocket casts login returned no token")
+        self.token_until = time.time() + int(d.get("expiresIn") or 3600) - 120
+
+    def _post(self, path: str, body: dict, auth: bool = True) -> dict:
+        h = {"Content-Type": "application/json", "User-Agent": "fmpresence/1.0"}
+        if auth:
+            h["Authorization"] = f"Bearer {self.token}"
+        req = urllib.request.Request(POCKETCASTS_API + path, data=json.dumps(body).encode(), headers=h, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.load(r)
+
+    def latest(self):
+        if not self.token or time.time() > self.token_until:
+            self.login()
+        try:
+            eps = self._post("/user/in_progress", {}).get("episodes") or []
+        except urllib.error.HTTPError as e:
+            if e.code != 401:
+                raise
+            self.login()
+            eps = self._post("/user/in_progress", {}).get("episodes") or []
+        return eps[0] if eps else None
+
+    def step(self, e, now: float):
+        """Turn the latest episode into a track (paused or playing), or None."""
+        if not e:
+            self.last_uuid = self.last_pos = None
+            return None
+        uuid, pos = e.get("uuid"), int(e.get("playedUpTo") or 0)
+        if uuid != self.last_uuid:
+            # a different episode on top while we watch = it was just started; at startup we cannot tell
+            self.moved_at = now if self.last_uuid is not None else 0.0
+        elif pos != self.last_pos:
+            self.moved_at = now
+        self.last_uuid, self.last_pos = uuid, pos
+        playing = bool(self.moved_at) and now - self.moved_at <= POCKETCASTS_IDLE
+        offset = pos + (now - self.moved_at if playing else 0)
+        return pocketcasts_track(e, playing, offset)
+
+    def now_playing(self, now: float):
+        return self.step(self.latest(), now)
+
+
 # ---------------------------------------------------------------- enrich / filter
 
 def hidden(cfg: Config, t: dict) -> bool:
@@ -492,6 +592,9 @@ def hidden(cfg: Config, t: dict) -> bool:
 def enrich(cfg: Config, t: dict) -> dict:
     """Fill art + link. Art order: own Plex cover (if the proxy is set) > iTunes > Last.fm."""
     t.setdefault("link", "")
+    if t["source"] == "pocketcasts":
+        t["plays"] = 0
+        return t
     if t.get("thumb") and cfg.art_base_url and cfg.art_secret and art_proxy_ok(cfg):
         t["art"] = plex_art_url(cfg, t["thumb"]) or t.get("art", "")
     if t["kind"] != "music":
@@ -550,7 +653,7 @@ class Tracker:
         if t["offset"] is not None:
             s = now - t["offset"]
             # seek, replay or new track: the Plex offset disagrees with our clock
-            if changed or abs(s - self.started) > 4:
+            if changed or abs(s - self.started) > t.get("drift", 4):
                 self.started = s
         elif changed:
             self.started = now
@@ -577,17 +680,20 @@ class Tracker:
         if c.clickable and not video:
             # title -> song.link (or Last.fm track), artist -> Last.fm artist, cover -> Last.fm album
             kw["details_url"] = t.get("link") or t.get("url") or None
-            kw["state_url"] = lastfm_artist_url(t["artist"]) if t.get("artist") else None
-            album_url = lastfm_album_url(t.get("album_artist") or t["artist"], t.get("album", ""))
+            kw["state_url"] = t.get("artist_url") or (lastfm_artist_url(t["artist"]) if t.get("artist") else None)
+            if t["source"] == "pocketcasts":
+                album_url = t.get("artist_url", "")
+            else:
+                album_url = lastfm_album_url(t.get("album_artist") or t["artist"], t.get("album", ""))
             kw["large_url"] = album_url if (album_url and t.get("art")) else None
         buttons = []
         if t.get("link"):
             buttons.append({"label": "Listen", "url": t["link"]})
         if t.get("url"):
-            buttons.append({"label": "View on Last.fm", "url": t["url"]})
+            buttons.append({"label": t.get("url_label") or "View on Last.fm", "url": t["url"]})
         if buttons:
             kw["buttons"] = buttons[:2]
-        if c.spotify_icon and not video:
+        if c.spotify_icon and t["kind"] == "music":
             kw.update(small_image=c.spotify_icon_url, small_text="Find on Spotify",
                       small_url=spotify_search_url(t["artist"], t["title"]))
         if not t["paused"]:
@@ -596,6 +702,8 @@ class Tracker:
                 kw["end"] = int(self.started + t["duration"])
         if c.app_name:
             kw["name"] = c.app_name
+        elif t["source"] == "pocketcasts":
+            kw["name"] = "Pocket Casts"  # "Listening to Pocket Casts" instead of the Discord app's name
         return {k: v for k, v in kw.items() if v is not None}
 
 
@@ -642,8 +750,9 @@ class RPC:
 # ---------------------------------------------------------------- run
 
 def run(cfg: Config) -> int:
-    if not cfg.discord_client_id or not (cfg.use_plex or cfg.use_lastfm):
-        log.error("need DISCORD_CLIENT_ID plus PLEX_URL+PLEX_TOKEN and/or LASTFM_USER+LASTFM_API_KEY (see %s)", ENV_FILE)
+    if not cfg.discord_client_id or not (cfg.use_plex or cfg.use_pocketcasts or cfg.use_lastfm):
+        log.error("need DISCORD_CLIENT_ID plus at least one source: PLEX_URL+PLEX_TOKEN, "
+                  "POCKETCASTS_EMAIL+POCKETCASTS_PASSWORD or LASTFM_USER+LASTFM_API_KEY (see %s)", ENV_FILE)
         return 2
 
     plex_user = cfg.plex_user
@@ -653,8 +762,7 @@ def run(cfg: Config) -> int:
         except Exception as e:
             log.warning("could not resolve Plex account (%s); showing any user's session", e)
     srcs = ([f"plex ({plex_user or 'any user'})"] if cfg.use_plex else []) + (
-        [f"last.fm ({cfg.lastfm_user})"] if cfg.use_lastfm else []
-    )
+        ["pocket casts"] if cfg.use_pocketcasts else []) + ([f"last.fm ({cfg.lastfm_user})"] if cfg.use_lastfm else [])
     log.info("sources: %s | art proxy: %s", " -> ".join(srcs), cfg.art_base_url or "off")
 
     wake = threading.Event()
@@ -665,6 +773,7 @@ def run(cfg: Config) -> int:
 
     rpc = RPC(cfg.discord_client_id)
     tracker = Tracker(cfg)
+    pocket = PocketCasts(cfg) if cfg.use_pocketcasts else None
     signal.signal(signal.SIGTERM, lambda *_: (rpc.call("clear"), rpc.drop(), sys.exit(0)))
     signal.signal(signal.SIGUSR1, lambda *_: wake.set())  # pause/resume: re-check now
     was_paused = False
@@ -683,7 +792,18 @@ def run(cfg: Config) -> int:
                 track = plex_now_playing(cfg, plex_user)
             except Exception as e:
                 errors.append(f"plex: {e}")
-        # Last.fm only matters when Plex is idle, and it changes slowly
+        if pocket:
+            # polled every loop: playing is only visible as a position that keeps moving
+            tried += 1
+            try:
+                pc = pocket.now_playing(now)
+            except Exception as e:
+                errors.append(f"pocket casts: {e}")
+                pc = None
+            # priority: playing Plex > playing Pocket Casts > paused Plex > paused Pocket Casts
+            if pc and (track is None or (track["paused"] and not pc["paused"])):
+                track = pc
+        # Last.fm only matters when nothing else is on, and it changes slowly
         if track is None and cfg.use_lastfm and now >= lastfm_next:
             tried += 1
             lastfm_next = now + cfg.lastfm_poll
@@ -735,6 +855,8 @@ def run(cfg: Config) -> int:
 
         # websocket up: Plex pushes changes, so a slow safety poll is enough
         timeout = 30 if (watcher and watcher.connected) else cfg.poll
+        if pocket:
+            timeout = min(timeout, 15)  # Pocket Casts has no push; poll it often enough to see pauses
         if idle_since is not None:
             timeout = min(timeout, max(1.0, idle_since + CLEAR_GRACE - now))
         if wake.wait(timeout):
@@ -852,9 +974,10 @@ def doctor(cfg: Config) -> int:
     def config():
         if not cfg.discord_client_id:
             return False, "DISCORD_CLIENT_ID is empty"
-        if not (cfg.use_plex or cfg.use_lastfm):
-            return False, "no source: set PLEX_URL+PLEX_TOKEN and/or LASTFM_USER+LASTFM_API_KEY"
-        return True, "sources: " + ", ".join(n for n, on in (("plex", cfg.use_plex), ("last.fm", cfg.use_lastfm)) if on)
+        if not (cfg.use_plex or cfg.use_pocketcasts or cfg.use_lastfm):
+            return False, "no source: set Plex, Pocket Casts and/or Last.fm variables"
+        on = (("plex", cfg.use_plex), ("pocket casts", cfg.use_pocketcasts), ("last.fm", cfg.use_lastfm))
+        return True, "sources: " + ", ".join(n for n, enabled in on if enabled)
 
     def discord():
         run_dir = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
@@ -877,7 +1000,7 @@ def doctor(cfg: Config) -> int:
         ident = get_json(f"{cfg.plex_url}/identity", {"X-Plex-Token": cfg.plex_token})["MediaContainer"]
         user = cfg.plex_user or plex_owner(cfg)
         t = plex_now_playing(cfg, user)
-        now = f"playing {t['artist']} - {t['title']}" if t else "nothing playing"
+        now = f"{'paused' if t['paused'] else 'playing'} {t['artist']} - {t['title']}" if t else "nothing playing"
         return True, f"server {ident.get('version')}, user {user}, {now}"
 
     def websocket():
@@ -889,6 +1012,14 @@ def doctor(cfg: Config) -> int:
         with connect(url, additional_headers={"X-Plex-Token": cfg.plex_token}, open_timeout=8):
             pass
         return True, "connected"
+
+    def pocketcasts_check():
+        if not cfg.use_pocketcasts:
+            return None, "not configured"
+        e = PocketCasts(cfg).latest()
+        if not e:
+            return True, "logged in, no episode in progress"
+        return True, f"logged in, latest: {e.get('podcastTitle')} - {e.get('title')} at {int(e.get('playedUpTo') or 0)} s"
 
     def lastfm_check():
         if not cfg.use_lastfm:
@@ -925,8 +1056,8 @@ def doctor(cfg: Config) -> int:
         return state == "active", f"{state}, {enabled}{paused}"
 
     for name, fn in (("env file", env_file), ("config", config), ("discord", discord), ("plex", plex),
-                     ("plex websocket", websocket), ("last.fm", lastfm_check), ("itunes", itunes),
-                     ("art proxy", art), ("service", service)):
+                     ("plex websocket", websocket), ("pocket casts", pocketcasts_check), ("last.fm", lastfm_check),
+                     ("itunes", itunes), ("art proxy", art), ("service", service)):
         check(name, fn)
     return 1 if any(r is False for r in results) else 0
 
@@ -947,13 +1078,16 @@ POLL_SECONDS=15
 # SHOW_PAUSED=1
 # SHOW_VIDEO=1
 # HIDE_ARTISTS=Artist One|Artist Two
+# Pocket Casts (unofficial API, email login only)
+# POCKETCASTS_EMAIL=
+# POCKETCASTS_PASSWORD=
 # ART_BASE_URL=https://art.example.com
 # ART_SECRET=
 """
 
 UNIT_TEMPLATE = """\
 [Unit]
-Description=fmpresence: Plex/Last.fm now playing -> Discord Rich Presence
+Description=fmpresence: Plex/Pocket Casts/Last.fm now playing -> Discord Rich Presence
 After=graphical-session.target network-online.target
 
 [Service]
